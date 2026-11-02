@@ -1,0 +1,1328 @@
+From c55fc45fe9f436e1d2cece09725e8f2a953db25a Mon Sep 17 00:00:00 2001
+From: rsdadada <rsddadada@outlook.com>
+Date: Mon, 2 Nov 2026 17:39:10 +0000
+Subject: [PATCH 2/3] feat(gui): configure personal cultivation targets and
+ supply budgets
+
+---
+ .../Single/MaaTask/OperProgressTask.cs        |  40 ++-
+ .../Configuration/Single/SpecificConfig.cs    |   3 +
+ .../Models/AsstTasks/AsstOperProgressTask.cs  |  32 ++
+ .../Models/TaskSettingVisibilityInfo.cs       |   2 +-
+ src/MaaWpfGui/Res/Localizations/en-us.xaml    |  48 ++-
+ src/MaaWpfGui/Res/Localizations/ja-jp.xaml    |  48 ++-
+ src/MaaWpfGui/Res/Localizations/ko-kr.xaml    |  48 ++-
+ src/MaaWpfGui/Res/Localizations/zh-cn.xaml    |  48 ++-
+ src/MaaWpfGui/Res/Localizations/zh-tw.xaml    |  48 ++-
+ .../Items/OperProgressPlanItemViewModel.cs    |  45 ++-
+ ...OperProgressTaskUserControlModel.Supply.cs | 282 ++++++++++++++++++
+ .../OperProgressTaskUserControlModel.cs       |  42 ++-
+ .../OperProgressTaskUserControl.xaml          | 159 +++++++++-
+ .../PersonalCultivationUiTests.csproj         |  16 +
+ tools/PersonalCultivationUiTests/Program.cs   |  85 ++++++
+ 15 files changed, 925 insertions(+), 21 deletions(-)
+ create mode 100644 src/MaaWpfGui/ViewModels/UserControl/TaskQueue/OperProgressTaskUserControlModel.Supply.cs
+ create mode 100644 tools/PersonalCultivationUiTests/PersonalCultivationUiTests.csproj
+ create mode 100644 tools/PersonalCultivationUiTests/Program.cs
+
+diff --git a/src/MaaWpfGui/Configuration/Single/MaaTask/OperProgressTask.cs b/src/MaaWpfGui/Configuration/Single/MaaTask/OperProgressTask.cs
+index 49d8443bf7..ca395718c5 100644
+--- a/src/MaaWpfGui/Configuration/Single/MaaTask/OperProgressTask.cs
++++ b/src/MaaWpfGui/Configuration/Single/MaaTask/OperProgressTask.cs
+@@ -33,7 +33,45 @@ public class OperProgressTask : BaseTask
+ 
+     public List<Plan> Plans { get; set; } = [];
+ 
+-    public record Plan(OperatorRole Role, string Name, int Elite, int SkillLevel, SkillMastery SkillMastery, bool ShowRole);
++    public SupplyOptions Supply { get; set; } = new();
++
++    public record Plan(OperatorRole Role, string Name, int Elite, int SkillLevel, SkillMastery SkillMastery, bool ShowRole)
++    {
++        public LevelTarget? TargetLevel { get; init; }
++    }
++
++    public record LevelTarget(int Elite, int Level);
++
++    public record SupplyOptions
++    {
++        public bool Enabled { get; init; }
++
++        public PurchaseBudget Credit { get; init; } = new();
++
++        public PurchaseBudget RedVoucher { get; init; } = new();
++
++        public MedicineBudget Medicine { get; init; } = new();
++
++        public Dictionary<string, string> StageOverrides { get; init; } = [];
++    }
++
++    public record PurchaseBudget
++    {
++        public bool Enabled { get; init; }
++
++        public int DailyLimit { get; init; }
++
++        public int Reserve { get; init; }
++    }
++
++    public record MedicineBudget
++    {
++        public bool Enabled { get; init; }
++
++        public int DailyLimit { get; init; }
++
++        public bool UseExpiring { get; init; }
++    }
+ 
+     /// <summary>
+     /// 干员技能 1/2/3 的专精等级，未设定的技能为 0。
+diff --git a/src/MaaWpfGui/Configuration/Single/SpecificConfig.cs b/src/MaaWpfGui/Configuration/Single/SpecificConfig.cs
+index f0764db882..beaa02e642 100644
+--- a/src/MaaWpfGui/Configuration/Single/SpecificConfig.cs
++++ b/src/MaaWpfGui/Configuration/Single/SpecificConfig.cs
+@@ -11,6 +11,7 @@
+ // but WITHOUT ANY WARRANTY
+ // </copyright>
+ #nullable enable
++using System;
+ using System.Text.Json.Serialization;
+ using MaaWpfGui.Configuration.Single.MaaTask;
+ using MaaWpfGui.Configuration.Single.Settings;
+@@ -22,6 +23,8 @@ namespace MaaWpfGui.Configuration.Single;
+ 
+ public class SpecificConfig : NotifyPropertyChangedWithValue
+ {
++    public string PersonalCultivationProfileId { get; set; } = Guid.NewGuid().ToString("N");
++
+     public void EventBinding(string prefix)
+     {
+         PropertyChanged += Handler.OnPropertyChangedFactory(prefix);
+diff --git a/src/MaaWpfGui/Models/AsstTasks/AsstOperProgressTask.cs b/src/MaaWpfGui/Models/AsstTasks/AsstOperProgressTask.cs
+index 5b86b45e3a..58566e8b8c 100644
+--- a/src/MaaWpfGui/Models/AsstTasks/AsstOperProgressTask.cs
++++ b/src/MaaWpfGui/Models/AsstTasks/AsstOperProgressTask.cs
+@@ -28,6 +28,10 @@ public class AsstOperProgressTask : AsstBaseTask
+     [JsonProperty("plans")]
+     public List<OperProgressTask.Plan> Plans { get; set; } = [];
+ 
++    public OperProgressTask.SupplyOptions Supply { get; set; } = new();
++
++    public string ProfileId { get; set; } = string.Empty;
++
+     public override (AsstTaskType TaskType, JObject Params) Serialize()
+     {
+         var list = new JArray();
+@@ -49,11 +53,39 @@ public class AsstOperProgressTask : AsstBaseTask
+             {
+                 planObj["skill_mastery"] = JArray.FromObject(p.SkillMastery.ToArray());
+             }
++            if (p.TargetLevel is { } target)
++            {
++                planObj["target_level"] = new JObject {
++                    ["elite"] = target.Elite,
++                    ["level"] = target.Level,
++                };
++            }
+             list.Add(planObj);
+         }
+         var jObject = new JObject {
+             ["plans"] = list,
+         };
++        if (Supply.Enabled)
++        {
++            jObject["supply"] = new JObject {
++                ["enabled"] = true,
++                ["profile_id"] = ProfileId,
++                ["credit"] = SerializePurchaseBudget(Supply.Credit),
++                ["red_voucher"] = SerializePurchaseBudget(Supply.RedVoucher),
++                ["medicine"] = new JObject {
++                    ["enabled"] = Supply.Medicine.Enabled,
++                    ["daily_limit"] = Supply.Medicine.DailyLimit,
++                    ["use_expiring"] = Supply.Medicine.UseExpiring,
++                },
++                ["stage_overrides"] = JObject.FromObject(Supply.StageOverrides),
++            };
++        }
+         return (TaskType, jObject);
+     }
++
++    private static JObject SerializePurchaseBudget(OperProgressTask.PurchaseBudget budget) => new() {
++        ["enabled"] = budget.Enabled,
++        ["daily_limit"] = budget.DailyLimit,
++        ["reserve"] = budget.Reserve,
++    };
+ }
+diff --git a/src/MaaWpfGui/Models/TaskSettingVisibilityInfo.cs b/src/MaaWpfGui/Models/TaskSettingVisibilityInfo.cs
+index 0efc269e48..59a1bd8766 100644
+--- a/src/MaaWpfGui/Models/TaskSettingVisibilityInfo.cs
++++ b/src/MaaWpfGui/Models/TaskSettingVisibilityInfo.cs
+@@ -170,7 +170,7 @@ public class TaskSettingVisibilityInfo : PropertyChangedBase
+     private void UpdateAdvancedSettingsVisibility(BaseTask task)
+     {
+         AdvancedSettingsVisibility = task switch {
+-            AwardTask or StartUpTask or UserDataUpdateTask or OperProgressTask => false,
++            AwardTask or StartUpTask or UserDataUpdateTask => false,
+             _ => true,
+         };
+     }
+diff --git a/src/MaaWpfGui/Res/Localizations/en-us.xaml b/src/MaaWpfGui/Res/Localizations/en-us.xaml
+index 39bc0bf625..fa2d670baa 100644
+--- a/src/MaaWpfGui/Res/Localizations/en-us.xaml
++++ b/src/MaaWpfGui/Res/Localizations/en-us.xaml
+@@ -1,4 +1,4 @@
+-<ResourceDictionary xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml" xmlns:system="clr-namespace:System;assembly=mscorlib">
++﻿<ResourceDictionary xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml" xmlns:system="clr-namespace:System;assembly=mscorlib">
+ 
+     <system:String x:Key="About.Github">GitHub</system:String>
+     <system:String x:Key="About.QqChannel">QQ channel</system:String>
+@@ -1426,6 +1426,51 @@ Please do not check it when the stage OF-1 is not unlocked.</system:String>
+     <system:String x:Key="OperBox.YituliuFetchFailed">Failed to fetch from Yituliu: {0}</system:String>
+     <system:String x:Key="OperBox.YituliuNoOperBoxData">The Yituliu account linked to the token has no operator data yet. Local recognition results are kept</system:String>
+     <system:String x:Key="OperBox.YituliuUploadCompleted">{key=OperBox.Title} sync completed (Yituliu)</system:String>
++    <system:String x:Key="PersonalCultivation.ActionBlocked">Unable to continue for now</system:String>
++    <system:String x:Key="PersonalCultivation.ActionBuy">Buying</system:String>
++    <system:String x:Key="PersonalCultivation.ActionCraft">Crafting</system:String>
++    <system:String x:Key="PersonalCultivation.ActionFarm">Farming</system:String>
++    <system:String x:Key="PersonalCultivation.ActionInspect">Checking</system:String>
++    <system:String x:Key="PersonalCultivation.ActionMissing">Needed</system:String>
++    <system:String x:Key="PersonalCultivation.BudgetExhausted">Daily limit reached</system:String>
++    <system:String x:Key="PersonalCultivation.BudgetStateInvalid">Budget record could not be read or saved; spending stopped</system:String>
++    <system:String x:Key="PersonalCultivation.Budgets">Daily training budgets</system:String>
++    <system:String x:Key="PersonalCultivation.BudgetsTip" xml:space="preserve">Limits are tracked per profile and CN server day, persist across restarts, and forbid spending when set to zero.&#10;Currency limits count currency units; potion limits count bottles, including expiring potions.&#10;Copied profiles share the original allowance. Originite Prime is never used.</system:String>
++    <system:String x:Key="PersonalCultivation.BuyWithCredit">Buy missing items with credit</system:String>
++    <system:String x:Key="PersonalCultivation.BuyWithRedVoucher">Buy chip catalysts with vouchers</system:String>
++    <system:String x:Key="PersonalCultivation.CreditBudgetReached">Credit daily limit or reserve reached; purchasing deferred</system:String>
++    <system:String x:Key="PersonalCultivation.DailyLimit">Daily spending limit</system:String>
++    <system:String x:Key="PersonalCultivation.DataUnavailable">Training data or recipe unavailable; check resource updates</system:String>
++    <system:String x:Key="PersonalCultivation.EnableSupply">Replenish training materials</system:String>
++    <system:String x:Key="PersonalCultivation.EnableSupplyTip" xml:space="preserve">Progress through operators in list order, using stock, crafting, purchases and farming.&#10;Stock-maintenance targets are preserved. Place training before other sanity-consuming tasks.</system:String>
++    <system:String x:Key="PersonalCultivation.Experience">Battle records (total EXP)</system:String>
++    <system:String x:Key="PersonalCultivation.ExperienceProgressUncertain">Current EXP is uncertain; battle record farming is deferred</system:String>
++    <system:String x:Key="PersonalCultivation.Interrupted">Stopped; training target retained</system:String>
++    <system:String x:Key="PersonalCultivation.InvalidLevelTarget">A level target requires elite phase 0–2 and level 1–90</system:String>
++    <system:String x:Key="PersonalCultivation.LevelPending">{0}: target Elite {1}, level {2}; {3}</system:String>
++    <system:String x:Key="PersonalCultivation.LevelProgress">{0}: Elite {1}, level {2}, {3}</system:String>
++    <system:String x:Key="PersonalCultivation.LevelTarget">Target level</system:String>
++    <system:String x:Key="PersonalCultivation.MedicineDailyLimit">Daily potion limit</system:String>
++    <system:String x:Key="PersonalCultivation.MoveBeforeFarming">Move before farming tasks</system:String>
++    <system:String x:Key="PersonalCultivation.MovedBeforeFarming">Training moved before farming and stock maintenance</system:String>
++    <system:String x:Key="PersonalCultivation.NoProgress">No progress; stopping this replenishment</system:String>
++    <system:String x:Key="PersonalCultivation.PrerequisiteNotMet">Training prerequisites are not met</system:String>
++    <system:String x:Key="PersonalCultivation.PurchaseUncertain">Price or purchase result is uncertain; purchasing stopped</system:String>
++    <system:String x:Key="PersonalCultivation.RecognitionFailed">Unable to confirm stock or progress</system:String>
++    <system:String x:Key="PersonalCultivation.RedVoucherPurchaseDisabled">Chip catalyst purchases with vouchers are disabled</system:String>
++    <system:String x:Key="PersonalCultivation.Reserve">Keep at least</system:String>
++    <system:String x:Key="PersonalCultivation.ResourceInsufficient">Insufficient resources; continue next run</system:String>
++    <system:String x:Key="PersonalCultivation.SaveStageSource">Add or update stage</system:String>
++    <system:String x:Key="PersonalCultivation.StageNameTip">Stage code, for example 1-7 or CE-6</system:String>
++    <system:String x:Key="PersonalCultivation.StageSourceInvalid">Select a material and enter a valid stage code</system:String>
++    <system:String x:Key="PersonalCultivation.StageSourceLabel">Material and stage</system:String>
++    <system:String x:Key="PersonalCultivation.StageSources">Material stage overrides</system:String>
++    <system:String x:Key="PersonalCultivation.StageSourcesTip" xml:space="preserve">Built-in permanent stages are used by default.&#10;Choose an unlocked stage with auto-deploy, such as 1-7. New stages are not cleared automatically.</system:String>
++    <system:String x:Key="PersonalCultivation.StageUnavailable">Stage unavailable</system:String>
++    <system:String x:Key="PersonalCultivation.SupplyProgress">{0}: {1} {2}, missing {3} {4} {5}</system:String>
++    <system:String x:Key="PersonalCultivation.TrainingPending">Waiting for specialization training</system:String>
++    <system:String x:Key="PersonalCultivation.UseExpiringMedicine">Only use potions expiring within two days</system:String>
++    <system:String x:Key="PersonalCultivation.UseMedicine">Allow sanity potions for farming</system:String>
+     <system:String x:Key="Recognition.Completed">Identification completed</system:String>
+     <system:String x:Key="Recognition.CopiedToClipboard">Copied to Clipboard</system:String>
+     <system:String x:Key="Recognition.Export">Export</system:String>
+@@ -1922,6 +1967,7 @@ Are you sure you want to disable the update progress window?</system:String>
+     <system:String x:Key="Settings.Update.Source">Update Source</system:String>
+     <system:String x:Key="Settings.Update.Source.Global">Global Source</system:String>
+     <system:String x:Key="Settings.Update.Source.MirrorChyan">MirrorChyan</system:String>
++    <system:String x:Key="Settings.Update.Source.Personal">Personal edition (GitHub)</system:String>
+     <system:String x:Key="Settings.Update.Source.Tip" xml:space="preserve">
+ 🌏 Using {key=Settings.Update.Source.Global}:
+     • {key=Settings.Update.CheckNow}: Update checks are provided by the MAA Team, with update packages pulled from GitHub. A direct domestic mirror is also available (limited bandwidth during peak hours)
+diff --git a/src/MaaWpfGui/Res/Localizations/ja-jp.xaml b/src/MaaWpfGui/Res/Localizations/ja-jp.xaml
+index d386807c92..ae2f12dc58 100644
+--- a/src/MaaWpfGui/Res/Localizations/ja-jp.xaml
++++ b/src/MaaWpfGui/Res/Localizations/ja-jp.xaml
+@@ -1,4 +1,4 @@
+-<ResourceDictionary xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml" xmlns:system="clr-namespace:System;assembly=mscorlib">
++﻿<ResourceDictionary xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml" xmlns:system="clr-namespace:System;assembly=mscorlib">
+ 
+     <system:String x:Key="About.Github">ソースコード: GitHub</system:String>
+     <system:String x:Key="About.QqChannel">QQチャンネル</system:String>
+@@ -1429,6 +1429,51 @@ DEBUGディレクトリに保存される画像には数量制限があり、超
+     <system:String x:Key="OperBox.YituliuFetchFailed">Yituliuからの取得に失敗しました：{0}</system:String>
+     <system:String x:Key="OperBox.YituliuNoOperBoxData">トークンに対応するYituliuアカウントにオペレーターデータがなく、ローカルの識別結果を保持しました</system:String>
+     <system:String x:Key="OperBox.YituliuUploadCompleted">{key=OperBox.Title}の取得が完了しました（Yituliu）</system:String>
++    <system:String x:Key="PersonalCultivation.ActionBlocked">現在は続行できません</system:String>
++    <system:String x:Key="PersonalCultivation.ActionBuy">購入</system:String>
++    <system:String x:Key="PersonalCultivation.ActionCraft">加工</system:String>
++    <system:String x:Key="PersonalCultivation.ActionFarm">周回</system:String>
++    <system:String x:Key="PersonalCultivation.ActionInspect">確認</system:String>
++    <system:String x:Key="PersonalCultivation.ActionMissing">補充待ち</system:String>
++    <system:String x:Key="PersonalCultivation.BudgetExhausted">本日の上限に達しました</system:String>
++    <system:String x:Key="PersonalCultivation.BudgetStateInvalid">予算記録を読み書きできないため、消費を停止しました</system:String>
++    <system:String x:Key="PersonalCultivation.Budgets">育成の1日上限</system:String>
++    <system:String x:Key="PersonalCultivation.BudgetsTip" xml:space="preserve">上限は設定別・中国版の日付更新で集計し、再起動してもリセットされません。0 は消費禁止です。&#10;通貨は消費額、理性回復剤は個数で数え、期限間近の回復剤も上限に含みます。&#10;複製した設定は元の上限を共有します。純正源石は使用しません。</system:String>
++    <system:String x:Key="PersonalCultivation.BuyWithCredit">不足素材をFPで購入</system:String>
++    <system:String x:Key="PersonalCultivation.BuyWithRedVoucher">購買資格証でSoC強化剤を購入</system:String>
++    <system:String x:Key="PersonalCultivation.CreditBudgetReached">FPの1日上限または最低保有数に達したため、購入を見合わせます</system:String>
++    <system:String x:Key="PersonalCultivation.DailyLimit">1日の消費上限</system:String>
++    <system:String x:Key="PersonalCultivation.DataUnavailable">育成データまたはレシピを利用できません。リソース更新を確認してください</system:String>
++    <system:String x:Key="PersonalCultivation.EnableSupply">育成に必要な素材を自動補充</system:String>
++    <system:String x:Key="PersonalCultivation.EnableSupplyTip" xml:space="preserve">リスト順に育成し、在庫・加工・購入・周回で不足素材を補います。&#10;在庫維持の目標は変更しません。育成を他の理性消費タスクより前に置いてください。</system:String>
++    <system:String x:Key="PersonalCultivation.Experience">作戦記録（合計経験値）</system:String>
++    <system:String x:Key="PersonalCultivation.ExperienceProgressUncertain">現在の経験値を確認できないため、作戦記録の周回を見合わせます</system:String>
++    <system:String x:Key="PersonalCultivation.Interrupted">停止しました。育成目標は保持されます</system:String>
++    <system:String x:Key="PersonalCultivation.InvalidLevelTarget">目標には昇進段階 0～2 とレベル 1～90 が必要です</system:String>
++    <system:String x:Key="PersonalCultivation.LevelPending">{0}：目標は昇進 {1}・レベル {2}。{3}</system:String>
++    <system:String x:Key="PersonalCultivation.LevelProgress">{0}：昇進 {1}、レベル {2}、{3}</system:String>
++    <system:String x:Key="PersonalCultivation.LevelTarget">目標レベル</system:String>
++    <system:String x:Key="PersonalCultivation.MedicineDailyLimit">1日の使用個数</system:String>
++    <system:String x:Key="PersonalCultivation.MoveBeforeFarming">理性消費タスクより前へ移動</system:String>
++    <system:String x:Key="PersonalCultivation.MovedBeforeFarming">育成を理性消費・在庫維持タスクより前へ移動しました</system:String>
++    <system:String x:Key="PersonalCultivation.NoProgress">進行できないため、この補充を停止</system:String>
++    <system:String x:Key="PersonalCultivation.PrerequisiteNotMet">育成条件を満たしていません</system:String>
++    <system:String x:Key="PersonalCultivation.PurchaseUncertain">価格または購入結果を確認できないため、購入を停止しました</system:String>
++    <system:String x:Key="PersonalCultivation.RecognitionFailed">在庫数または進捗を確認できません</system:String>
++    <system:String x:Key="PersonalCultivation.RedVoucherPurchaseDisabled">購買資格証でのSoC強化剤購入は無効です</system:String>
++    <system:String x:Key="PersonalCultivation.Reserve">最低保有数</system:String>
++    <system:String x:Key="PersonalCultivation.ResourceInsufficient">素材不足のため、次回続行します</system:String>
++    <system:String x:Key="PersonalCultivation.SaveStageSource">ステージを追加・更新</system:String>
++    <system:String x:Key="PersonalCultivation.StageNameTip">ステージ名（例：1-7、CE-6）</system:String>
++    <system:String x:Key="PersonalCultivation.StageSourceInvalid">素材を選択し、有効なステージ名を入力してください</system:String>
++    <system:String x:Key="PersonalCultivation.StageSourceLabel">素材とステージ</system:String>
++    <system:String x:Key="PersonalCultivation.StageSources">素材の周回ステージ設定</system:String>
++    <system:String x:Key="PersonalCultivation.StageSourcesTip" xml:space="preserve">未指定の場合は内蔵の常設ステージを使用します。&#10;1-7 など、自動指揮可能な解放済みステージを指定してください。未クリアの攻略は行いません。</system:String>
++    <system:String x:Key="PersonalCultivation.StageUnavailable">ステージは現在利用できません</system:String>
++    <system:String x:Key="PersonalCultivation.SupplyProgress">{0}：{1} {2}、不足 {3} {4} {5}</system:String>
++    <system:String x:Key="PersonalCultivation.TrainingPending">特化訓練待ち</system:String>
++    <system:String x:Key="PersonalCultivation.UseExpiringMedicine">2日以内に期限切れになる回復剤のみ使用</system:String>
++    <system:String x:Key="PersonalCultivation.UseMedicine">素材周回に理性回復剤を使用</system:String>
+     <system:String x:Key="Recognition.Completed">認識完了</system:String>
+     <system:String x:Key="Recognition.CopiedToClipboard">クリップボードへコピー</system:String>
+     <system:String x:Key="Recognition.Export">エクスポート</system:String>
+@@ -1925,6 +1970,7 @@ MAA は非インストール型のアプリケーションであり、レジス
+     <system:String x:Key="Settings.Update.Source">更新ソース</system:String>
+     <system:String x:Key="Settings.Update.Source.Global">グローバルソース</system:String>
+     <system:String x:Key="Settings.Update.Source.MirrorChyan">MirrorChyan</system:String>
++    <system:String x:Key="Settings.Update.Source.Personal">個人拡張版（GitHub）</system:String>
+     <system:String x:Key="Settings.Update.Source.Tip" xml:space="preserve">
+ 🌏 {key=Settings.Update.Source.Global}を使用：
+     • {key=Settings.Update.CheckNow}：MAA Team による更新確認で、GitHub から更新パッケージを取得します。中国国内向けに直通ミラーも提供されています（ピーク時は帯域制限の可能性あり）
+diff --git a/src/MaaWpfGui/Res/Localizations/ko-kr.xaml b/src/MaaWpfGui/Res/Localizations/ko-kr.xaml
+index a624749f6c..b0c8d06ed8 100644
+--- a/src/MaaWpfGui/Res/Localizations/ko-kr.xaml
++++ b/src/MaaWpfGui/Res/Localizations/ko-kr.xaml
+@@ -1,4 +1,4 @@
+-<ResourceDictionary xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml" xmlns:system="clr-namespace:System;assembly=mscorlib">
++﻿<ResourceDictionary xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml" xmlns:system="clr-namespace:System;assembly=mscorlib">
+ 
+     <system:String x:Key="About.Github">소스 코드: GitHub</system:String>
+     <system:String x:Key="About.QqChannel">QQ 채널</system:String>
+@@ -1427,6 +1427,51 @@ OF-1 스테이지가 개방되지 않은 경우에는 선택하지 마세요.</s
+     <system:String x:Key="OperBox.YituliuFetchFailed">Yituliu에서 가져오기 실패: {0}</system:String>
+     <system:String x:Key="OperBox.YituliuNoOperBoxData">토큰에 해당하는 Yituliu 계정에 오퍼레이터 데이터가 없어 로컬 인식 결과를 유지합니다</system:String>
+     <system:String x:Key="OperBox.YituliuUploadCompleted">{key=OperBox.Title} 완료(Yituliu)</system:String>
++    <system:String x:Key="PersonalCultivation.ActionBlocked">현재 진행 불가</system:String>
++    <system:String x:Key="PersonalCultivation.ActionBuy">구매</system:String>
++    <system:String x:Key="PersonalCultivation.ActionCraft">가공</system:String>
++    <system:String x:Key="PersonalCultivation.ActionFarm">파밍</system:String>
++    <system:String x:Key="PersonalCultivation.ActionInspect">확인</system:String>
++    <system:String x:Key="PersonalCultivation.ActionMissing">보충 필요</system:String>
++    <system:String x:Key="PersonalCultivation.BudgetExhausted">일일 한도 도달</system:String>
++    <system:String x:Key="PersonalCultivation.BudgetStateInvalid">예산 기록을 읽거나 저장할 수 없어 소모를 중지했습니다</system:String>
++    <system:String x:Key="PersonalCultivation.Budgets">일일 육성 예산</system:String>
++    <system:String x:Key="PersonalCultivation.BudgetsTip" xml:space="preserve">예산은 프로필별 중국 서버 게임 일자로 집계되며 재시작해도 유지됩니다. 0은 소모 금지입니다.&#10;화폐는 수량, 이성 회복제는 개수로 계산하며 만료 임박 회복제도 포함됩니다.&#10;복사한 프로필은 원래 한도를 공유합니다. 순오리지늄은 사용하지 않습니다.</system:String>
++    <system:String x:Key="PersonalCultivation.BuyWithCredit">크레딧으로 부족 재료 구매</system:String>
++    <system:String x:Key="PersonalCultivation.BuyWithRedVoucher">구매증명서로 칩 첨가제 구매</system:String>
++    <system:String x:Key="PersonalCultivation.CreditBudgetReached">크레딧 일일 한도 또는 최소 보유량에 도달하여 구매를 보류합니다</system:String>
++    <system:String x:Key="PersonalCultivation.DailyLimit">일일 소모 한도</system:String>
++    <system:String x:Key="PersonalCultivation.DataUnavailable">육성 데이터 또는 제조법을 사용할 수 없습니다. 리소스 업데이트를 확인하세요</system:String>
++    <system:String x:Key="PersonalCultivation.EnableSupply">육성 부족 재료 자동 보충</system:String>
++    <system:String x:Key="PersonalCultivation.EnableSupplyTip" xml:space="preserve">목록 순서대로 재고, 가공, 구매 및 파밍을 통해 육성을 진행합니다.&#10;재고 유지 목표는 바뀌지 않습니다. 다른 이성 소모 작업보다 앞에 배치하세요.</system:String>
++    <system:String x:Key="PersonalCultivation.Experience">작전기록 (총 경험치)</system:String>
++    <system:String x:Key="PersonalCultivation.ExperienceProgressUncertain">현재 경험치를 확인할 수 없어 작전기록 파밍을 보류합니다</system:String>
++    <system:String x:Key="PersonalCultivation.Interrupted">중지됨. 육성 목표는 유지됩니다</system:String>
++    <system:String x:Key="PersonalCultivation.InvalidLevelTarget">목표는 정예 단계 0–2 및 레벨 1–90이어야 합니다</system:String>
++    <system:String x:Key="PersonalCultivation.LevelPending">{0}: 목표 정예 {1}, 레벨 {2}; {3}</system:String>
++    <system:String x:Key="PersonalCultivation.LevelProgress">{0}: 정예 {1}, 레벨 {2}, {3}</system:String>
++    <system:String x:Key="PersonalCultivation.LevelTarget">목표 레벨</system:String>
++    <system:String x:Key="PersonalCultivation.MedicineDailyLimit">일일 사용 개수</system:String>
++    <system:String x:Key="PersonalCultivation.MoveBeforeFarming">이성 소모 작업 앞으로 이동</system:String>
++    <system:String x:Key="PersonalCultivation.MovedBeforeFarming">육성을 파밍 및 재고 유지 작업 앞으로 이동했습니다</system:String>
++    <system:String x:Key="PersonalCultivation.NoProgress">진행 불가로 해당 보충 중지</system:String>
++    <system:String x:Key="PersonalCultivation.PrerequisiteNotMet">육성 선행 조건 미충족</system:String>
++    <system:String x:Key="PersonalCultivation.PurchaseUncertain">가격 또는 구매 결과를 확인할 수 없어 구매를 중지했습니다</system:String>
++    <system:String x:Key="PersonalCultivation.RecognitionFailed">재고 또는 진행도 확인 불가</system:String>
++    <system:String x:Key="PersonalCultivation.RedVoucherPurchaseDisabled">구매증명서로 칩 첨가제 구매가 꺼져 있습니다</system:String>
++    <system:String x:Key="PersonalCultivation.Reserve">최소 보유량</system:String>
++    <system:String x:Key="PersonalCultivation.ResourceInsufficient">재료 부족으로 다음 실행 시 계속합니다</system:String>
++    <system:String x:Key="PersonalCultivation.SaveStageSource">스테이지 추가 또는 수정</system:String>
++    <system:String x:Key="PersonalCultivation.StageNameTip">스테이지 코드 (예: 1-7, CE-6)</system:String>
++    <system:String x:Key="PersonalCultivation.StageSourceInvalid">재료를 선택하고 유효한 스테이지 코드를 입력하세요</system:String>
++    <system:String x:Key="PersonalCultivation.StageSourceLabel">재료 및 스테이지</system:String>
++    <system:String x:Key="PersonalCultivation.StageSources">재료 스테이지 지정</system:String>
++    <system:String x:Key="PersonalCultivation.StageSourcesTip" xml:space="preserve">미지정 시 기본 상시 스테이지를 사용합니다.&#10;1-7 등 자동 지휘 가능한 개방된 스테이지를 입력하세요. 신규 스테이지는 자동 공략하지 않습니다.</system:String>
++    <system:String x:Key="PersonalCultivation.StageUnavailable">스테이지 이용 불가</system:String>
++    <system:String x:Key="PersonalCultivation.SupplyProgress">{0}: {1} {2}, 부족 {3} {4} {5}</system:String>
++    <system:String x:Key="PersonalCultivation.TrainingPending">스킬 특화 훈련 대기</system:String>
++    <system:String x:Key="PersonalCultivation.UseExpiringMedicine">2일 이내 만료되는 회복제만 사용</system:String>
++    <system:String x:Key="PersonalCultivation.UseMedicine">재료 파밍 시 이성 회복제 허용</system:String>
+     <system:String x:Key="Recognition.Completed">인식 완료</system:String>
+     <system:String x:Key="Recognition.CopiedToClipboard">클립보드에 복사됨</system:String>
+     <system:String x:Key="Recognition.Export">내보내기</system:String>
+@@ -1923,6 +1968,7 @@ MAA는 비설치형 응용 프로그램으로, 삭제 시 레지스트리 항목
+     <system:String x:Key="Settings.Update.Source">업데이트 소스</system:String>
+     <system:String x:Key="Settings.Update.Source.Global">글로벌 소스</system:String>
+     <system:String x:Key="Settings.Update.Source.MirrorChyan">MirrorChyan</system:String>
++    <system:String x:Key="Settings.Update.Source.Personal">개인 확장판 (GitHub)</system:String>
+     <system:String x:Key="Settings.Update.Source.Tip" xml:space="preserve">
+ 🌏 {key=Settings.Update.Source.Global} 사용:
+     • {key=Settings.Update.CheckNow}: MAA Team에서 업데이트를 확인하고, GitHub에서 설치 파일을 다운로드합니다. 중국에서는 직접 연결 가능한 미러도 제공됩니다. (대역폭이 제한되어 있으며, 트래픽에 따라 접속이 제한될 수 있습니다)
+diff --git a/src/MaaWpfGui/Res/Localizations/zh-cn.xaml b/src/MaaWpfGui/Res/Localizations/zh-cn.xaml
+index b98205074a..ec4fb24fbd 100644
+--- a/src/MaaWpfGui/Res/Localizations/zh-cn.xaml
++++ b/src/MaaWpfGui/Res/Localizations/zh-cn.xaml
+@@ -1,4 +1,4 @@
+-<ResourceDictionary xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml" xmlns:system="clr-namespace:System;assembly=mscorlib">
++﻿<ResourceDictionary xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml" xmlns:system="clr-namespace:System;assembly=mscorlib">
+ 
+     <system:String x:Key="About.Github">源码: GitHub</system:String>
+     <system:String x:Key="About.QqChannel">QQ 频道</system:String>
+@@ -1427,6 +1427,51 @@ DEBUG 目录下保存的图片有数量限制，超出后会自动清理旧图
+     <system:String x:Key="OperBox.YituliuFetchFailed">从一图流获取失败：{0}</system:String>
+     <system:String x:Key="OperBox.YituliuNoOperBoxData">Token 对应的一图流账号暂无干员练度数据，已保留本地识别结果</system:String>
+     <system:String x:Key="OperBox.YituliuUploadCompleted">{key=OperBox.Title}完成（一图流）</system:String>
++    <system:String x:Key="PersonalCultivation.ActionBlocked">暂时无法继续</system:String>
++    <system:String x:Key="PersonalCultivation.ActionBuy">购买</system:String>
++    <system:String x:Key="PersonalCultivation.ActionCraft">合成</system:String>
++    <system:String x:Key="PersonalCultivation.ActionFarm">刷取</system:String>
++    <system:String x:Key="PersonalCultivation.ActionInspect">核对</system:String>
++    <system:String x:Key="PersonalCultivation.ActionMissing">待补充</system:String>
++    <system:String x:Key="PersonalCultivation.BudgetExhausted">已达到今日额度</system:String>
++    <system:String x:Key="PersonalCultivation.BudgetStateInvalid">无法读取或保存预算记录，已停止消耗</system:String>
++    <system:String x:Key="PersonalCultivation.Budgets">每日培养预算</system:String>
++    <system:String x:Key="PersonalCultivation.BudgetsTip" xml:space="preserve">额度按档案和国服游戏日累计，重启不会重置，0 表示不允许消耗。&#10;信用、红票按货币数量计；理智药按瓶数计，临期药也计入上限。&#10;复制的档案共用原额度；不使用源石。</system:String>
++    <system:String x:Key="PersonalCultivation.BuyWithCredit">信用购买缺少的材料</system:String>
++    <system:String x:Key="PersonalCultivation.BuyWithRedVoucher">红票购买芯片助剂</system:String>
++    <system:String x:Key="PersonalCultivation.CreditBudgetReached">信用每日额度或保留余额限制，暂不购买</system:String>
++    <system:String x:Key="PersonalCultivation.DailyLimit">每日消耗上限</system:String>
++    <system:String x:Key="PersonalCultivation.DataUnavailable">培养数据或配方不可用，请检查资源更新</system:String>
++    <system:String x:Key="PersonalCultivation.EnableSupply">按培养缺口自动补料</system:String>
++    <system:String x:Key="PersonalCultivation.EnableSupplyTip" xml:space="preserve">按列表顺序优先推进培养，使用库存、合成、购买或刷取所缺材料。&#10;不修改库存保持目标；建议将培养放在其他耗理智任务之前。</system:String>
++    <system:String x:Key="PersonalCultivation.Experience">作战记录（总经验）</system:String>
++    <system:String x:Key="PersonalCultivation.ExperienceProgressUncertain">无法确认当前经验，暂不补刷作战记录</system:String>
++    <system:String x:Key="PersonalCultivation.Interrupted">已停止，保留培养目标</system:String>
++    <system:String x:Key="PersonalCultivation.InvalidLevelTarget">等级目标需要精英阶段 0–2 和等级 1–90</system:String>
++    <system:String x:Key="PersonalCultivation.LevelPending">{0}：目标为精英 {1}、等级 {2}；{3}</system:String>
++    <system:String x:Key="PersonalCultivation.LevelProgress">{0}：精英 {1}，等级 {2}，{3}</system:String>
++    <system:String x:Key="PersonalCultivation.LevelTarget">目标等级</system:String>
++    <system:String x:Key="PersonalCultivation.MedicineDailyLimit">每日最多使用</system:String>
++    <system:String x:Key="PersonalCultivation.MoveBeforeFarming">移到刷理智任务之前</system:String>
++    <system:String x:Key="PersonalCultivation.MovedBeforeFarming">已将培养移到刷理智和库存保持之前</system:String>
++    <system:String x:Key="PersonalCultivation.NoProgress">未能继续推进，停止当前补料</system:String>
++    <system:String x:Key="PersonalCultivation.PrerequisiteNotMet">当前培养条件不满足</system:String>
++    <system:String x:Key="PersonalCultivation.PurchaseUncertain">无法确认价格或购买结果，已停止购买</system:String>
++    <system:String x:Key="PersonalCultivation.RecognitionFailed">无法确认当前数量或进度</system:String>
++    <system:String x:Key="PersonalCultivation.RedVoucherPurchaseDisabled">未开启红票购买芯片助剂</system:String>
++    <system:String x:Key="PersonalCultivation.Reserve">至少保留</system:String>
++    <system:String x:Key="PersonalCultivation.ResourceInsufficient">材料不足，下次继续</system:String>
++    <system:String x:Key="PersonalCultivation.SaveStageSource">添加或更新关卡</system:String>
++    <system:String x:Key="PersonalCultivation.StageNameTip">关卡代号，例如 1-7、CE-6</system:String>
++    <system:String x:Key="PersonalCultivation.StageSourceInvalid">请选择材料并填写有效的关卡代号</system:String>
++    <system:String x:Key="PersonalCultivation.StageSourceLabel">材料与关卡</system:String>
++    <system:String x:Key="PersonalCultivation.StageSources">自定义材料关卡</system:String>
++    <system:String x:Key="PersonalCultivation.StageSourcesTip" xml:space="preserve">未指定时使用内置常驻关卡。&#10;填写已解锁且可代理的关卡，例如 1-7；不会自动开荒。</system:String>
++    <system:String x:Key="PersonalCultivation.StageUnavailable">关卡暂不可用</system:String>
++    <system:String x:Key="PersonalCultivation.SupplyProgress">{0}：{1} {2}，缺口 {3} {4} {5}</system:String>
++    <system:String x:Key="PersonalCultivation.TrainingPending">等待专精训练</system:String>
++    <system:String x:Key="PersonalCultivation.UseExpiringMedicine">仅使用两天内到期的理智药</system:String>
++    <system:String x:Key="PersonalCultivation.UseMedicine">补料时允许使用理智药</system:String>
+     <system:String x:Key="Recognition.Completed">识别完成</system:String>
+     <system:String x:Key="Recognition.CopiedToClipboard">已复制到剪切板</system:String>
+     <system:String x:Key="Recognition.Export">导出</system:String>
+@@ -1923,6 +1968,7 @@ DEBUG 目录下保存的图片有数量限制，超出后会自动清理旧图
+     <system:String x:Key="Settings.Update.Source">更新源</system:String>
+     <system:String x:Key="Settings.Update.Source.Global">海外源</system:String>
+     <system:String x:Key="Settings.Update.Source.MirrorChyan">Mirror酱</system:String>
++    <system:String x:Key="Settings.Update.Source.Personal">个人增强版（GitHub）</system:String>
+     <system:String x:Key="Settings.Update.Source.Tip" xml:space="preserve">
+ 🌏 使用{key=Settings.Update.Source.Global}：
+     • {key=Settings.Update.CheckNow}：由 MAA Team 提供更新检测，从 GitHub 拉取更新包，国内同步提供直连镜像（带宽有限，高峰期可能受限）
+diff --git a/src/MaaWpfGui/Res/Localizations/zh-tw.xaml b/src/MaaWpfGui/Res/Localizations/zh-tw.xaml
+index c123516496..61dbf1732a 100644
+--- a/src/MaaWpfGui/Res/Localizations/zh-tw.xaml
++++ b/src/MaaWpfGui/Res/Localizations/zh-tw.xaml
+@@ -1,4 +1,4 @@
+-<ResourceDictionary xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml" xmlns:system="clr-namespace:System;assembly=mscorlib">
++﻿<ResourceDictionary xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml" xmlns:system="clr-namespace:System;assembly=mscorlib">
+ 
+     <system:String x:Key="About.Github">原始碼：GitHub</system:String>
+     <system:String x:Key="About.QqChannel">QQ 頻道</system:String>
+@@ -1427,6 +1427,51 @@ DEBUG 目錄下儲存的圖片有數量限制，超出後會自動清理舊圖
+     <system:String x:Key="OperBox.YituliuFetchFailed">從一圖流讀取失敗：{0}</system:String>
+     <system:String x:Key="OperBox.YituliuNoOperBoxData">Token 對應的一圖流帳號暫無幹員練度資料，已保留本機辨識結果</system:String>
+     <system:String x:Key="OperBox.YituliuUploadCompleted">{key=OperBox.Title}完成（一圖流）</system:String>
++    <system:String x:Key="PersonalCultivation.ActionBlocked">暫時無法繼續</system:String>
++    <system:String x:Key="PersonalCultivation.ActionBuy">購買</system:String>
++    <system:String x:Key="PersonalCultivation.ActionCraft">合成</system:String>
++    <system:String x:Key="PersonalCultivation.ActionFarm">刷取</system:String>
++    <system:String x:Key="PersonalCultivation.ActionInspect">核對</system:String>
++    <system:String x:Key="PersonalCultivation.ActionMissing">待補充</system:String>
++    <system:String x:Key="PersonalCultivation.BudgetExhausted">已達到今日額度</system:String>
++    <system:String x:Key="PersonalCultivation.BudgetStateInvalid">無法讀取或儲存預算紀錄，已停止消耗</system:String>
++    <system:String x:Key="PersonalCultivation.Budgets">每日培養預算</system:String>
++    <system:String x:Key="PersonalCultivation.BudgetsTip" xml:space="preserve">額度按設定檔和國服遊戲日累計，重啟不會重置，0 表示不允許消耗。&#10;信用、紅票按貨幣數量計；理智藥按瓶數計，即期藥也計入上限。&#10;複製的設定檔共用原額度；不使用源石。</system:String>
++    <system:String x:Key="PersonalCultivation.BuyWithCredit">信用購買缺少的材料</system:String>
++    <system:String x:Key="PersonalCultivation.BuyWithRedVoucher">紅票購買晶片助劑</system:String>
++    <system:String x:Key="PersonalCultivation.CreditBudgetReached">信用每日額度或保留餘額限制，暫不購買</system:String>
++    <system:String x:Key="PersonalCultivation.DailyLimit">每日消耗上限</system:String>
++    <system:String x:Key="PersonalCultivation.DataUnavailable">培養資料或配方無法使用，請檢查資源更新</system:String>
++    <system:String x:Key="PersonalCultivation.EnableSupply">按培養缺口自動補料</system:String>
++    <system:String x:Key="PersonalCultivation.EnableSupplyTip" xml:space="preserve">按清單順序優先推進培養，使用庫存、合成、購買或刷取所缺材料。&#10;不修改庫存保持目標；建議將培養放在其他消耗理智任務之前。</system:String>
++    <system:String x:Key="PersonalCultivation.Experience">作戰紀錄（總經驗）</system:String>
++    <system:String x:Key="PersonalCultivation.ExperienceProgressUncertain">無法確認目前經驗，暫不補刷作戰紀錄</system:String>
++    <system:String x:Key="PersonalCultivation.Interrupted">已停止，保留培養目標</system:String>
++    <system:String x:Key="PersonalCultivation.InvalidLevelTarget">等級目標需要精英階段 0–2 和等級 1–90</system:String>
++    <system:String x:Key="PersonalCultivation.LevelPending">{0}：目標為精英 {1}、等級 {2}；{3}</system:String>
++    <system:String x:Key="PersonalCultivation.LevelProgress">{0}：精英 {1}，等級 {2}，{3}</system:String>
++    <system:String x:Key="PersonalCultivation.LevelTarget">目標等級</system:String>
++    <system:String x:Key="PersonalCultivation.MedicineDailyLimit">每日最多使用</system:String>
++    <system:String x:Key="PersonalCultivation.MoveBeforeFarming">移到刷理智任務之前</system:String>
++    <system:String x:Key="PersonalCultivation.MovedBeforeFarming">已將培養移到刷理智和庫存保持之前</system:String>
++    <system:String x:Key="PersonalCultivation.NoProgress">未能繼續推進，停止目前補料</system:String>
++    <system:String x:Key="PersonalCultivation.PrerequisiteNotMet">目前培養條件不滿足</system:String>
++    <system:String x:Key="PersonalCultivation.PurchaseUncertain">無法確認價格或購買結果，已停止購買</system:String>
++    <system:String x:Key="PersonalCultivation.RecognitionFailed">無法確認目前數量或進度</system:String>
++    <system:String x:Key="PersonalCultivation.RedVoucherPurchaseDisabled">未開啟紅票購買晶片助劑</system:String>
++    <system:String x:Key="PersonalCultivation.Reserve">至少保留</system:String>
++    <system:String x:Key="PersonalCultivation.ResourceInsufficient">材料不足，下次繼續</system:String>
++    <system:String x:Key="PersonalCultivation.SaveStageSource">新增或更新關卡</system:String>
++    <system:String x:Key="PersonalCultivation.StageNameTip">關卡代號，例如 1-7、CE-6</system:String>
++    <system:String x:Key="PersonalCultivation.StageSourceInvalid">請選擇材料並填寫有效的關卡代號</system:String>
++    <system:String x:Key="PersonalCultivation.StageSourceLabel">材料與關卡</system:String>
++    <system:String x:Key="PersonalCultivation.StageSources">自訂材料關卡</system:String>
++    <system:String x:Key="PersonalCultivation.StageSourcesTip" xml:space="preserve">未指定時使用內建常駐關卡。&#10;填寫已解鎖且可代理的關卡，例如 1-7；不會自動開荒。</system:String>
++    <system:String x:Key="PersonalCultivation.StageUnavailable">關卡暫不可用</system:String>
++    <system:String x:Key="PersonalCultivation.SupplyProgress">{0}：{1} {2}，缺口 {3} {4} {5}</system:String>
++    <system:String x:Key="PersonalCultivation.TrainingPending">等待專精訓練</system:String>
++    <system:String x:Key="PersonalCultivation.UseExpiringMedicine">僅使用兩天內到期的理智藥</system:String>
++    <system:String x:Key="PersonalCultivation.UseMedicine">補料時允許使用理智藥</system:String>
+     <system:String x:Key="Recognition.Completed">辨識完成</system:String>
+     <system:String x:Key="Recognition.CopiedToClipboard">已複製到剪貼簿</system:String>
+     <system:String x:Key="Recognition.Export">匯出</system:String>
+@@ -1923,6 +1968,7 @@ DEBUG 目錄下儲存的圖片有數量限制，超出後會自動清理舊圖
+     <system:String x:Key="Settings.Update.Source">更新來源</system:String>
+     <system:String x:Key="Settings.Update.Source.Global">全域來源</system:String>
+     <system:String x:Key="Settings.Update.Source.MirrorChyan">MirrorChyan</system:String>
++    <system:String x:Key="Settings.Update.Source.Personal">個人增強版（GitHub）</system:String>
+     <system:String x:Key="Settings.Update.Source.Tip" xml:space="preserve">
+ 🌏 使用 {key=Settings.Update.Source.Global}：
+     • {key=Settings.Update.CheckNow}：由 MAA Team 提供更新偵測，從 GitHub 下載更新壓縮檔，中國國內同步提供直連鏡像站（頻寬有限，高峰時段可能受限）
+diff --git a/src/MaaWpfGui/ViewModels/Items/OperProgressPlanItemViewModel.cs b/src/MaaWpfGui/ViewModels/Items/OperProgressPlanItemViewModel.cs
+index 1751e7a2e5..d103811e72 100644
+--- a/src/MaaWpfGui/ViewModels/Items/OperProgressPlanItemViewModel.cs
++++ b/src/MaaWpfGui/ViewModels/Items/OperProgressPlanItemViewModel.cs
+@@ -12,12 +12,15 @@
+ // </copyright>
+ 
+ #nullable enable
++using System;
++using System.Collections.Generic;
+ using System.Linq;
+ using System.Runtime.CompilerServices;
+ using System.Windows.Media.Imaging;
+ using MaaWpfGui.Constants.Enums;
+ using MaaWpfGui.Extensions;
+ using MaaWpfGui.Helper;
++using MaaWpfGui.Utilities.ValueType;
+ using Serilog;
+ using Stylet;
+ using static MaaWpfGui.Configuration.Single.MaaTask.OperProgressTask;
+@@ -27,7 +30,7 @@ namespace MaaWpfGui.ViewModels.Items;
+ /// <summary>干员培养计划中的单个干员卡片，一个条目对应一名干员。</summary>
+ public class OperProgressPlanItemViewModel : PropertyChangedBase
+ {
+-    public static readonly string[] MainProperty = [nameof(IsEliteSelected), nameof(Elite), nameof(IsMainSkillLevelSelected), nameof(MainSkillLevel), nameof(IsSpecializationSkill1Selected), nameof(IsSpecializationSkill2Selected), nameof(IsSpecializationSkill3Selected), nameof(SpecializationSkill1), nameof(SpecializationSkill2), nameof(SpecializationSkill3)];
++    public static readonly string[] MainProperty = [nameof(IsEliteSelected), nameof(Elite), nameof(IsMainSkillLevelSelected), nameof(MainSkillLevel), nameof(IsSpecializationSkill1Selected), nameof(IsSpecializationSkill2Selected), nameof(IsSpecializationSkill3Selected), nameof(SpecializationSkill1), nameof(SpecializationSkill2), nameof(SpecializationSkill3), nameof(IsLevelSelected), nameof(TargetElite), nameof(TargetLevel)];
+ 
+     /// <summary>
+     /// Initializes a new instance of the <see cref="OperProgressPlanItemViewModel"/> class.
+@@ -40,7 +43,8 @@ public class OperProgressPlanItemViewModel : PropertyChangedBase
+     /// <param name="mainSkillLevel">技能等级目标，0 表示不设定。</param>
+     /// <param name="specializationSkillLevel">专精目标，未设定的技能为 0。</param>
+     /// <param name="showRole">是否显示干员职业。</param>
+-    public OperProgressPlanItemViewModel(int index, OperatorRole role, string name, int elite, int mainSkillLevel, SkillMastery specializationSkillLevel, bool showRole)
++    /// <param name="levelTarget">独立的精英阶段与等级目标。</param>
++    public OperProgressPlanItemViewModel(int index, OperatorRole role, string name, int elite, int mainSkillLevel, SkillMastery specializationSkillLevel, bool showRole, LevelTarget? levelTarget = null)
+     {
+         Index = index;
+         Role = role;
+@@ -60,6 +64,7 @@ public class OperProgressPlanItemViewModel : PropertyChangedBase
+         var oper = DataHelper.Characters.Values.FirstOrDefault(c => (role == OperatorRole.Unknown || c.Role == role) && c.Name == name);
+         if (oper is not null)
+         {
++            Rarity = oper.Rarity;
+             OperId = oper.Id;
+             DisplayName = (DataHelper.GetLocalizedCharacterName(oper) ?? name) + (ShowRole ? $"({RoleString})" : string.Empty);
+             if (Role == OperatorRole.Unknown)
+@@ -89,8 +94,44 @@ public class OperProgressPlanItemViewModel : PropertyChangedBase
+             SkillCount = 3;
+             DisplayName = name + (ShowRole ? $"({RoleString})" : string.Empty);
+         }
++
++        TargetElite = levelTarget?.Elite ?? MaxTargetElite;
++        TargetLevel = levelTarget?.Level ?? Math.Min(60, MaxTargetLevel);
++        IsLevelSelected = levelTarget is not null;
++    }
++
++    private int Rarity { get; } = 6;
++
++    public bool IsLevelSelected { get; set => SetAndNotify(ref field, value); }
++
++    public int MaxTargetElite => Rarity >= 4 ? 2 : Rarity == 3 ? 1 : 0;
++
++    public List<GenericCombinedData<int>> TargetEliteList => Enumerable.Range(0, MaxTargetElite + 1).Select(value => new GenericCombinedData<int>(value.ToString(), value)).ToList();
++
++    public int TargetElite
++    {
++        get;
++        set {
++            if (SetAndNotify(ref field, Math.Clamp(value, 0, MaxTargetElite)))
++            {
++                NotifyOfPropertyChange(nameof(MaxTargetLevel));
++                TargetLevel = Math.Clamp(TargetLevel, 1, MaxTargetLevel);
++            }
++        }
+     }
+ 
++    public int TargetLevel
++    {
++        get;
++        set => SetAndNotify(ref field, Math.Clamp(value, 1, MaxTargetLevel));
++    }
++
++    public int MaxTargetLevel => TargetElite switch {
++        0 => Rarity >= 5 ? 50 : Rarity == 4 ? 45 : Rarity == 3 ? 40 : 30,
++        1 => Rarity switch { >= 6 => 80, 5 => 70, 4 => 60, _ => 55 },
++        _ => Rarity switch { >= 6 => 90, 5 => 80, _ => 70 },
++    };
++
+     public int Index { get; set => SetAndNotify(ref field, value); }
+ 
+     public OperatorRole Role { get; set => SetAndNotify(ref field, value); }
+diff --git a/src/MaaWpfGui/ViewModels/UserControl/TaskQueue/OperProgressTaskUserControlModel.Supply.cs b/src/MaaWpfGui/ViewModels/UserControl/TaskQueue/OperProgressTaskUserControlModel.Supply.cs
+new file mode 100644
+index 0000000000..806a4e35be
+--- /dev/null
++++ b/src/MaaWpfGui/ViewModels/UserControl/TaskQueue/OperProgressTaskUserControlModel.Supply.cs
+@@ -0,0 +1,282 @@
++// <copyright file="OperProgressTaskUserControlModel.Supply.cs" company="MaaAssistantArknights">
++// Part of the MaaWpfGui project, maintained by the MaaAssistantArknights team (Maa Team)
++// Copyright (C) 2021-2026 MaaAssistantArknights Contributors
++//
++// This program is free software: you can redistribute it and/or modify
++// it under the terms of the GNU Affero General Public License v3.0 only as published by
++// the Free Software Foundation, either version 3 of the License, or
++// any later version.
++//
++// This program is distributed in the hope that it will be useful,
++// but WITHOUT ANY WARRANTY
++// </copyright>
++
++#nullable enable
++using System;
++using System.Collections.Generic;
++using System.Linq;
++using System.Runtime.CompilerServices;
++using System.Text.RegularExpressions;
++using MaaWpfGui.Configuration.Factory;
++using MaaWpfGui.Configuration.Single.MaaTask;
++using MaaWpfGui.Constants;
++using MaaWpfGui.Constants.Enums;
++using MaaWpfGui.Helper;
++using MaaWpfGui.Models;
++using MaaWpfGui.States;
++using MaaWpfGui.Utilities.ValueType;
++using Newtonsoft.Json.Linq;
++using static MaaWpfGui.Configuration.Single.MaaTask.OperProgressTask;
++using static MaaWpfGui.Main.AsstProxy;
++
++namespace MaaWpfGui.ViewModels.UserControl.TaskQueue;
++
++public partial class OperProgressTaskUserControlModel
++{
++    public bool EnableSupply
++    {
++        get => GetTaskConfig<OperProgressTask>().Supply.Enabled;
++        set => SetSupply(options => options with { Enabled = value });
++    }
++
++    public bool BuyWithCredit
++    {
++        get => GetTaskConfig<OperProgressTask>().Supply.Credit.Enabled;
++        set => SetSupply(options => options with { Credit = options.Credit with { Enabled = value } });
++    }
++
++    public int CreditDailyLimit
++    {
++        get => GetTaskConfig<OperProgressTask>().Supply.Credit.DailyLimit;
++        set => SetSupply(options => options with { Credit = options.Credit with { DailyLimit = Math.Clamp(value, 0, 999999) } });
++    }
++
++    public int CreditReserve
++    {
++        get => GetTaskConfig<OperProgressTask>().Supply.Credit.Reserve;
++        set => SetSupply(options => options with { Credit = options.Credit with { Reserve = Math.Clamp(value, 0, 999999) } });
++    }
++
++    public bool BuyWithRedVoucher
++    {
++        get => GetTaskConfig<OperProgressTask>().Supply.RedVoucher.Enabled;
++        set => SetSupply(options => options with { RedVoucher = options.RedVoucher with { Enabled = value } });
++    }
++
++    public int RedVoucherDailyLimit
++    {
++        get => GetTaskConfig<OperProgressTask>().Supply.RedVoucher.DailyLimit;
++        set => SetSupply(options => options with { RedVoucher = options.RedVoucher with { DailyLimit = Math.Clamp(value, 0, 999999) } });
++    }
++
++    public int RedVoucherReserve
++    {
++        get => GetTaskConfig<OperProgressTask>().Supply.RedVoucher.Reserve;
++        set => SetSupply(options => options with { RedVoucher = options.RedVoucher with { Reserve = Math.Clamp(value, 0, 999999) } });
++    }
++
++    public bool SupplyUseMedicine
++    {
++        get => GetTaskConfig<OperProgressTask>().Supply.Medicine.Enabled;
++        set => SetSupply(options => options with { Medicine = options.Medicine with { Enabled = value } });
++    }
++
++    public int SupplyMedicineDailyLimit
++    {
++        get => GetTaskConfig<OperProgressTask>().Supply.Medicine.DailyLimit;
++        set => SetSupply(options => options with { Medicine = options.Medicine with { DailyLimit = Math.Clamp(value, 0, 999) } });
++    }
++
++    public bool SupplyUseExpiringMedicine
++    {
++        get => GetTaskConfig<OperProgressTask>().Supply.Medicine.UseExpiring;
++        set => SetSupply(options => options with { Medicine = options.Medicine with { UseExpiring = value } });
++    }
++
++    public List<GenericCombinedData<string>> SupplyMaterials => [
++        new(LocalizationHelper.GetString("PersonalCultivation.Experience"), "__experience"),
++        .. ItemListHelper.ArkItems
++            .Where(pair => pair.Key is not ("2001" or "2002" or "2003" or "2004"))
++            .OrderBy(pair => pair.Value.SortId)
++            .Select(pair => new GenericCombinedData<string>(pair.Value.Name, pair.Key)),
++    ];
++
++    public string SupplyMaterialId { get; set => SetAndNotify(ref field, value); } = string.Empty;
++
++    public string SupplyStage { get; set => SetAndNotify(ref field, value); } = string.Empty;
++
++    public List<StageOverrideItem> SupplyStageOverrides => GetTaskConfig<OperProgressTask>().Supply.StageOverrides
++        .Select(pair => new StageOverrideItem(pair.Key, SupplyItemName(pair.Key), pair.Value))
++        .ToList();
++
++    public record StageOverrideItem(string ItemId, string ItemName, string Stage);
++
++    public void SaveStageOverride()
++    {
++        var stage = SupplyStage.Trim().ToUpperInvariant();
++        if ((SupplyMaterialId != "__experience" && !ItemListHelper.ArkItems.ContainsKey(SupplyMaterialId)) ||
++            !Regex.IsMatch(stage, @"^[A-Z0-9]+(?:-[A-Z0-9]+)+$"))
++        {
++            Instances.TaskQueueViewModel.AddLog(LocalizationHelper.GetString("PersonalCultivation.StageSourceInvalid"), UiLogColor.Warning);
++            return;
++        }
++
++        var sources = new Dictionary<string, string>(GetTaskConfig<OperProgressTask>().Supply.StageOverrides) {
++            [SupplyMaterialId] = stage,
++        };
++        SetSupply(options => options with { StageOverrides = sources }, nameof(SupplyStageOverrides));
++        SupplyStage = stage;
++    }
++
++    public void RemoveStageOverride(StageOverrideItem item)
++    {
++        var sources = new Dictionary<string, string>(GetTaskConfig<OperProgressTask>().Supply.StageOverrides);
++        if (sources.Remove(item.ItemId))
++        {
++            SetSupply(options => options with { StageOverrides = sources }, nameof(SupplyStageOverrides));
++        }
++    }
++
++    public void MoveBeforeFarming()
++    {
++        if (!RunningState.Instance.GetIdle())
++        {
++            return;
++        }
++
++        var tasks = ConfigFactory.CurrentConfig.TaskQueue;
++        var current = TaskSettingVisibilityInfo.Instance.CurrentIndex;
++        if (current < 0 || current >= tasks.Count || tasks[current] is not OperProgressTask)
++        {
++            return;
++        }
++
++        var firstFarming = Enumerable.Range(0, current).FirstOrDefault(index => tasks[index] is FightTask or DepotMaintainTask, -1);
++        if (firstFarming >= 0)
++        {
++            // 复用任务列表的 Move 事件同步配置和选中项，不直接改两份集合。
++            Instances.TaskQueueViewModel.TaskItemViewModels.Move(current, firstFarming);
++            Instances.TaskQueueViewModel.AddLog(LocalizationHelper.GetString("PersonalCultivation.MovedBeforeFarming"), UiLogColor.Info);
++        }
++    }
++
++    private void SetSupply(Func<SupplyOptions, SupplyOptions> update, [CallerMemberName] string propertyName = "")
++    {
++        var next = update(GetTaskConfig<OperProgressTask>().Supply);
++        SetTaskConfig<OperProgressTask>(task => task.Supply == next, task => task.Supply = next, propertyName);
++    }
++
++    private void RefreshSupplySettings()
++    {
++        NotifyOfPropertyChange(nameof(SupplyMaterials));
++        NotifyOfPropertyChange(nameof(SupplyStageOverrides));
++    }
++
++    private static LevelTarget? ParseLevelTarget(JToken? token)
++    {
++        if (token is null)
++        {
++            return null;
++        }
++
++        if (token is not JObject target || target["elite"]?.Type != JTokenType.Integer || target["level"]?.Type != JTokenType.Integer)
++        {
++            throw new FormatException(LocalizationHelper.GetString("PersonalCultivation.InvalidLevelTarget"));
++        }
++
++        var elite = target.Value<int>("elite");
++        var level = target.Value<int>("level");
++        if (elite is < 0 or > 2 || level is < 1 or > 90)
++        {
++            throw new FormatException(LocalizationHelper.GetString("PersonalCultivation.InvalidLevelTarget"));
++        }
++
++        return new LevelTarget(elite, level);
++    }
++
++    private void HandleLevelProgress(AsstSubTaskMsg msg)
++    {
++        var details = msg.Details;
++        if (details is null)
++        {
++            return;
++        }
++
++        var result = details.Value<string>("result");
++        var reason = details.Value<string>("reason") ?? details.Value<string>("result_detail");
++        var confirmed = result is "Completed" or "AlreadySatisfied" ||
++            (result == "Success" && reason is "Completed" or "AlreadySatisfied");
++        var name = details.Value<string>("name") ?? string.Empty;
++        var elite = details.Value<int?>("elite");
++        var level = details.Value<int?>("level");
++        var task = GetConfigByTaskId<OperProgressTask>(msg.TaskId);
++        if (confirmed && elite is not null && level is not null && task is not null)
++        {
++            var role = ParsePlan(details).Role;
++            task.Plans = task.Plans.Select(plan => plan.Name == name && (role == OperatorRole.Unknown || plan.Role == role) &&
++                plan.TargetLevel is { } target && (elite > target.Elite || (elite == target.Elite && level >= target.Level))
++                    ? plan with { TargetLevel = null }
++                    : plan).ToList();
++            RefreshUI(TaskSettingVisibilityInfo.CurrentTask);
++        }
++
++        Instances.TaskQueueViewModel.AddLog(
++            LocalizationHelper.GetStringFormat(confirmed ? "PersonalCultivation.LevelProgress" : "PersonalCultivation.LevelPending",
++                DataHelper.GetLocalizedCharacterName(name) ?? name,
++                confirmed ? elite ?? -1 : details.Value<int?>("target_elite") ?? -1,
++                confirmed ? level ?? -1 : details.Value<int?>("target_level") ?? -1,
++                confirmed ? LocalizationHelper.GetString("Common.Success") : LocalizeSupplyReason(reason)),
++            confirmed ? UiLogColor.Info : UiLogColor.Warning);
++    }
++
++    private static void HandleSupplyProgress(AsstSubTaskMsg msg)
++    {
++        if (msg.Details is not { } details)
++        {
++            return;
++        }
++
++        var name = details.Value<string>("name") ?? string.Empty;
++        var itemId = details.Value<string>("item_id") ?? string.Empty;
++        var action = details.Value<string>("action") ?? details.Value<string>("phase") ?? string.Empty;
++        var reason = details.Value<string>("reason");
++        Instances.TaskQueueViewModel.AddLog(
++            LocalizationHelper.GetStringFormat("PersonalCultivation.SupplyProgress",
++                DataHelper.GetLocalizedCharacterName(name) ?? name,
++                LocalizeSupplyReason(action),
++                SupplyItemName(itemId),
++                details.Value<int?>("missing") ?? 0,
++                details.Value<string>("stage") ?? string.Empty,
++                LocalizeSupplyReason(reason)),
++            string.IsNullOrEmpty(reason) ? UiLogColor.Info : UiLogColor.Warning);
++    }
++
++    private static string LocalizeSupplyReason(string? value) => value switch {
++        null or "" => string.Empty,
++        "farm" or "farming" => LocalizationHelper.GetString("PersonalCultivation.ActionFarm"),
++        "synthesize" or "craft" => LocalizationHelper.GetString("PersonalCultivation.ActionCraft"),
++        "purchase" or "buy" or "credit" or "red_voucher" => LocalizationHelper.GetString("PersonalCultivation.ActionBuy"),
++        "inspect" => LocalizationHelper.GetString("PersonalCultivation.ActionInspect"),
++        "missing" => LocalizationHelper.GetString("PersonalCultivation.ActionMissing"),
++        "blocked" => LocalizationHelper.GetString("PersonalCultivation.ActionBlocked"),
++        "budget_exhausted" or "BudgetExhausted" or "RedVoucherBudgetReached" => LocalizationHelper.GetString("PersonalCultivation.BudgetExhausted"),
++        "no_progress" or "NoProgress" or "NoMaterialProgress" or "OperationLimit" => LocalizationHelper.GetString("PersonalCultivation.NoProgress"),
++        "RecognitionFailed" or "recognition_failed" or "InventoryRecognitionFailed" or "LevelSelectionUncertain" => LocalizationHelper.GetString("PersonalCultivation.RecognitionFailed"),
++        "stage_unavailable" or "StageUnavailable" or "MaterialSourceUnavailable" => LocalizationHelper.GetString("PersonalCultivation.StageUnavailable"),
++        "PrerequisiteTraining" or "TrainingRoomBusy" => LocalizationHelper.GetString("PersonalCultivation.TrainingPending"),
++        "CultivationDataMissing" or "InvalidRecipe" => LocalizationHelper.GetString("PersonalCultivation.DataUnavailable"),
++        "BudgetStateInvalid" => LocalizationHelper.GetString("PersonalCultivation.BudgetStateInvalid"),
++        "CreditBudgetReached" => LocalizationHelper.GetString("PersonalCultivation.CreditBudgetReached"),
++        "ExperienceProgressUncertain" => LocalizationHelper.GetString("PersonalCultivation.ExperienceProgressUncertain"),
++        "PurchaseAmountUncertain" or "PurchasePriceUncertain" => LocalizationHelper.GetString("PersonalCultivation.PurchaseUncertain"),
++        "Interrupted" or "Interrupt" => LocalizationHelper.GetString("PersonalCultivation.Interrupted"),
++        "RedVoucherPurchaseDisabled" => LocalizationHelper.GetString("PersonalCultivation.RedVoucherPurchaseDisabled"),
++        "ResourceInsufficient" => LocalizationHelper.GetString("PersonalCultivation.ResourceInsufficient"),
++        "Unsupported" or "PrerequisiteNotMet" => LocalizationHelper.GetString("PersonalCultivation.PrerequisiteNotMet"),
++        _ => LocalizationHelper.GetString("PersonalCultivation.ActionBlocked"),
++    };
++
++    private static string SupplyItemName(string itemId) => itemId == "__experience"
++        ? LocalizationHelper.GetString("PersonalCultivation.Experience")
++        : ItemListHelper.GetItemName(itemId) ?? itemId;
++}
+diff --git a/src/MaaWpfGui/ViewModels/UserControl/TaskQueue/OperProgressTaskUserControlModel.cs b/src/MaaWpfGui/ViewModels/UserControl/TaskQueue/OperProgressTaskUserControlModel.cs
+index 52d154e3a4..4375ac0b8d 100644
+--- a/src/MaaWpfGui/ViewModels/UserControl/TaskQueue/OperProgressTaskUserControlModel.cs
++++ b/src/MaaWpfGui/ViewModels/UserControl/TaskQueue/OperProgressTaskUserControlModel.cs
+@@ -20,6 +20,7 @@ using System.ComponentModel;
+ using System.Linq;
+ using System.Text;
+ using System.Windows;
++using MaaWpfGui.Configuration.Factory;
+ using MaaWpfGui.Configuration.Single.MaaTask;
+ using MaaWpfGui.Constants;
+ using MaaWpfGui.Constants.Enums;
+@@ -38,7 +39,7 @@ using static MaaWpfGui.Main.AsstProxy;
+ 
+ namespace MaaWpfGui.ViewModels.UserControl.TaskQueue;
+ 
+-public class OperProgressTaskUserControlModel : TaskSettingsViewModel, OperProgressTaskUserControlModel.ISerialize
++public partial class OperProgressTaskUserControlModel : TaskSettingsViewModel, OperProgressTaskUserControlModel.ISerialize
+ {
+     private static readonly ILogger _logger = Log.ForContext<OperProgressTaskUserControlModel>();
+ 
+@@ -70,7 +71,7 @@ public class OperProgressTaskUserControlModel : TaskSettingsViewModel, OperProgr
+             int elite = plan.Elite;
+             int mainSkillLevel = plan.SkillLevel;
+             var specializationLevel = plan.SkillMastery;
+-            return new OperProgressPlanItemViewModel(index, plan.Role, plan.Name, elite, mainSkillLevel, specializationLevel, plan.ShowRole);
++            return new OperProgressPlanItemViewModel(index, plan.Role, plan.Name, elite, mainSkillLevel, specializationLevel, plan.ShowRole, plan.TargetLevel);
+         }).ToList();
+         PlanItems = [.. list];
+         PlanItems.CollectionChanged += PlanItems_CollectionChanged;
+@@ -83,7 +84,9 @@ public class OperProgressTaskUserControlModel : TaskSettingsViewModel, OperProgr
+             var elite = item.IsEliteSelected ? item.Elite : 0;
+             var mainSkillLevel = item.IsMainSkillLevelSelected ? item.MainSkillLevel : 0;
+             var mastery = SkillMastery.Of(item.SpecializationSkillLevel[0], item.SpecializationSkillLevel[1], item.SpecializationSkillLevel[2]);
+-            return new Plan(item.Role, item.Name, elite, mainSkillLevel, mastery, item.ShowRole);
++            return new Plan(item.Role, item.Name, elite, mainSkillLevel, mastery, item.ShowRole) {
++                TargetLevel = item.IsLevelSelected ? new LevelTarget(item.TargetElite, item.TargetLevel) : null,
++            };
+         }).ToList();
+         SetTaskConfig<OperProgressTask>(t => t.Plans.SequenceEqual(list), t => t.Plans = list);
+     }
+@@ -112,6 +115,7 @@ public class OperProgressTaskUserControlModel : TaskSettingsViewModel, OperProgr
+ 
+         _isRefreshing = true;
+         RefreshPlanItems(task);
++        RefreshSupplySettings();
+         Refresh();
+         _isRefreshing = false;
+     }
+@@ -137,7 +141,7 @@ public class OperProgressTaskUserControlModel : TaskSettingsViewModel, OperProgr
+             return;
+         }
+ 
+-        task.Plans = [.. list.Where(plan => plan.Elite != 0 || plan.SkillLevel != 0 || plan.SkillMastery.ToArray().Any(x => x > 0))];
++        task.Plans = [.. list.Where(plan => plan.Elite != 0 || plan.SkillLevel != 0 || plan.SkillMastery.ToArray().Any(x => x > 0) || plan.TargetLevel is not null)];
+         RefreshUI(TaskSettingVisibilityInfo.CurrentTask);
+     }
+ 
+@@ -178,7 +182,9 @@ public class OperProgressTaskUserControlModel : TaskSettingsViewModel, OperProgr
+                         Instances.TaskQueueViewModel.AddLog(LocalizationHelper.GetString("TaskQueue.OperProgress.ParseFailed") + $"\nunknown oper: {plan.Role}-{plan.Name}", UiLogColor.Error);
+                         return;
+                     }
+-                    list.Add(new Plan(plan.Role, plan.Name, plan.Elite ?? 0, plan.MainSkillLevel ?? 0, plan.SkillMastery ?? SkillMastery.Of(0, 0, 0), false));
++                    list.Add(new Plan(plan.Role, plan.Name, plan.Elite ?? 0, plan.MainSkillLevel ?? 0, plan.SkillMastery ?? SkillMastery.Of(0, 0, 0), false) {
++                        TargetLevel = ParseLevelTarget(item["target_level"]),
++                    });
+                 }
+                 SetTaskConfig<OperProgressTask>(t => t.Plans.SequenceEqual(list), t => t.Plans = list);
+                 RefreshUI(TaskSettingVisibilityInfo.CurrentTask);
+@@ -281,6 +287,7 @@ public class OperProgressTaskUserControlModel : TaskSettingsViewModel, OperProgr
+     private void RefreshPlanItemLocalization()
+     {
+         SpecializationSkillLevelList.RefreshLocalization();
++        RefreshSupplySettings();
+         foreach (var item in PlanItems)
+         {
+             item.RefreshLocalizedText();
+@@ -312,7 +319,11 @@ public class OperProgressTaskUserControlModel : TaskSettingsViewModel, OperProgr
+                 return (null, []);
+             }
+ 
+-            var task = new AsstOperProgressTask { Plans = operProgress.Plans };
++            var task = new AsstOperProgressTask {
++                Plans = operProgress.Plans,
++                Supply = operProgress.Supply,
++                ProfileId = ConfigFactory.CurrentConfig.PersonalCultivationProfileId,
++            };
+             return taskId switch {
+                 int id when id > 0 => (Instances.AsstProxy.AsstSetTaskParamsEncoded(id, task), [id]),
+                 null => FromSingle(Instances.AsstProxy.AsstAppendTaskWithEncoding(TaskType.OperProgress, task)),
+@@ -329,6 +340,14 @@ public class OperProgressTaskUserControlModel : TaskSettingsViewModel, OperProgr
+         }
+         switch (msg.What)
+         {
++            case "OperProgressLevel":
++                HandleLevelProgress(msg);
++                break;
++
++            case "OperProgressSupply":
++                HandleSupplyProgress(msg);
++                break;
++
+             case "OperProgressSummary":
+                 var summary = msg.Details?.ToObject<ProgressSummary>();
+                 Instances.TaskQueueViewModel.AddLog(
+@@ -355,17 +374,19 @@ public class OperProgressTaskUserControlModel : TaskSettingsViewModel, OperProgr
+ 
+                     var index = list.IndexOf(plan);
+                     bool isModified = false;
+-                    if (callback.Elite is int elite && elite >= plan.Elite)
++                    var confirmed = msg.Details?.Value<string>("result") == "Success" &&
++                        msg.Details?.Value<string>("result_detail") is "Completed" or "AlreadySatisfied";
++                    if (confirmed && callback.Elite is int elite && elite >= plan.Elite)
+                     {
+                         isModified = true;
+                         plan = plan with { Elite = 0 };
+                     }
+-                    if (callback.MainSkillLevel is int mainSkill && mainSkill >= plan.SkillLevel)
++                    if (confirmed && callback.MainSkillLevel is int mainSkill && mainSkill >= plan.SkillLevel)
+                     {
+                         isModified = true;
+                         plan = plan with { SkillLevel = 0 };
+                     }
+-                    if (callback.SkillMastery is SkillMastery callbackMastery)
++                    if (confirmed && callback.SkillMastery is SkillMastery callbackMastery)
+                     {
+                         int[] skillSpec = plan.SkillMastery.ToArray();
+                         int[] callbackSkillSpec = callbackMastery.ToArray();
+@@ -402,8 +423,7 @@ public class OperProgressTaskUserControlModel : TaskSettingsViewModel, OperProgr
+                             "TaskQueue.OperProgress.Detail",
+                             list.IndexOf(plan) + 1,
+                             operName,
+-                            LocalizationHelper.GetString(status switch
+-                            {
++                            LocalizationHelper.GetString(status switch {
+                                 "Success" => "Common.Success",
+                                 "Failed" => "Common.Failed",
+                                 "Skipped" => "Common.Skipped",
+diff --git a/src/MaaWpfGui/Views/UserControl/TaskQueue/OperProgressTaskUserControl.xaml b/src/MaaWpfGui/Views/UserControl/TaskQueue/OperProgressTaskUserControl.xaml
+index 46f2f4db1d..ed3bd1b1c3 100644
+--- a/src/MaaWpfGui/Views/UserControl/TaskQueue/OperProgressTaskUserControl.xaml
++++ b/src/MaaWpfGui/Views/UserControl/TaskQueue/OperProgressTaskUserControl.xaml
+@@ -1,4 +1,4 @@
+-<UserControl
++﻿<UserControl
+     x:Class="MaaWpfGui.Views.UserControl.TaskQueue.OperProgressTaskUserControl"
+     xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+@@ -474,6 +474,31 @@
+                                             SelectedValue="{Binding SpecializationSkill3}"
+                                             SelectedValuePath="Value" />
+                                     </Grid>
++                                    <CheckBox
++                                        Margin="0,10,0,4"
++                                        Content="{DynamicResource PersonalCultivation.LevelTarget}"
++                                        IsChecked="{Binding IsLevelSelected}" />
++                                    <WrapPanel IsEnabled="{Binding IsLevelSelected}">
++                                        <controls:TextBlock
++                                            Margin="0,0,4,0"
++                                            VerticalAlignment="Center"
++                                            Text="{DynamicResource TaskQueue.OperProgress.Elite}" />
++                                        <ComboBox
++                                            Width="56"
++                                            DisplayMemberPath="Display"
++                                            ItemsSource="{Binding TargetEliteList}"
++                                            SelectedValue="{Binding TargetElite}"
++                                            SelectedValuePath="Value" />
++                                        <controls:TextBlock
++                                            Margin="6,0,4,0"
++                                            VerticalAlignment="Center"
++                                            Text="Lv." />
++                                        <hc:NumericUpDown
++                                            Width="68"
++                                            Maximum="{Binding MaxTargetLevel}"
++                                            Minimum="1"
++                                            Value="{Binding TargetLevel, UpdateSourceTrigger=PropertyChanged}" />
++                                    </WrapPanel>
+                                 </StackPanel>
+                             </Border>
+                         </Expander>
+@@ -481,5 +506,137 @@
+                 </ListBox.ItemTemplate>
+             </ListBox>
+         </StackPanel>
++        <StackPanel IsEnabled="{c:Binding !IsCurrentTaskRunning, Source={x:Static ui_vms:TaskQueueViewModel.TaskSettingVisibilities}}" Visibility="{c:Binding EnableAdvancedSettings, Source={x:Static ui_vms:TaskQueueViewModel.TaskSettingVisibilities}}">
++            <DockPanel Margin="0,8">
++                <controls:TooltipBlock DockPanel.Dock="Right" TooltipText="{DynamicResource PersonalCultivation.EnableSupplyTip}" />
++                <CheckBox Content="{DynamicResource PersonalCultivation.EnableSupply}" IsChecked="{Binding EnableSupply}" />
++            </DockPanel>
++            <Button
++                Margin="0,0,0,8"
++                Command="{s:Action MoveBeforeFarming}"
++                Content="{DynamicResource PersonalCultivation.MoveBeforeFarming}" />
++            <StackPanel IsEnabled="{Binding EnableSupply}">
++                <StackPanel Orientation="Horizontal">
++                    <controls:TextBlock Text="{DynamicResource PersonalCultivation.Budgets}" />
++                    <controls:TooltipBlock TooltipText="{DynamicResource PersonalCultivation.BudgetsTip}" />
++                </StackPanel>
++                <CheckBox
++                    Margin="0,8,0,4"
++                    Content="{DynamicResource PersonalCultivation.BuyWithCredit}"
++                    IsChecked="{Binding BuyWithCredit}" />
++                <StackPanel IsEnabled="{Binding BuyWithCredit}">
++                    <DockPanel Margin="0,2">
++                        <hc:NumericUpDown
++                            Width="90"
++                            DockPanel.Dock="Right"
++                            Maximum="999999"
++                            Minimum="0"
++                            Value="{Binding CreditDailyLimit, UpdateSourceTrigger=PropertyChanged}" />
++                        <controls:TextBlock VerticalAlignment="Center" Text="{DynamicResource PersonalCultivation.DailyLimit}" />
++                    </DockPanel>
++                    <DockPanel Margin="0,2">
++                        <hc:NumericUpDown
++                            Width="90"
++                            DockPanel.Dock="Right"
++                            Maximum="999999"
++                            Minimum="0"
++                            Value="{Binding CreditReserve, UpdateSourceTrigger=PropertyChanged}" />
++                        <controls:TextBlock VerticalAlignment="Center" Text="{DynamicResource PersonalCultivation.Reserve}" />
++                    </DockPanel>
++                </StackPanel>
++                <CheckBox
++                    Margin="0,8,0,4"
++                    Content="{DynamicResource PersonalCultivation.BuyWithRedVoucher}"
++                    IsChecked="{Binding BuyWithRedVoucher}" />
++                <StackPanel IsEnabled="{Binding BuyWithRedVoucher}">
++                    <DockPanel Margin="0,2">
++                        <hc:NumericUpDown
++                            Width="90"
++                            DockPanel.Dock="Right"
++                            Maximum="999999"
++                            Minimum="0"
++                            Value="{Binding RedVoucherDailyLimit, UpdateSourceTrigger=PropertyChanged}" />
++                        <controls:TextBlock VerticalAlignment="Center" Text="{DynamicResource PersonalCultivation.DailyLimit}" />
++                    </DockPanel>
++                    <DockPanel Margin="0,2">
++                        <hc:NumericUpDown
++                            Width="90"
++                            DockPanel.Dock="Right"
++                            Maximum="999999"
++                            Minimum="0"
++                            Value="{Binding RedVoucherReserve, UpdateSourceTrigger=PropertyChanged}" />
++                        <controls:TextBlock VerticalAlignment="Center" Text="{DynamicResource PersonalCultivation.Reserve}" />
++                    </DockPanel>
++                </StackPanel>
++                <CheckBox
++                    Margin="0,8,0,4"
++                    Content="{DynamicResource PersonalCultivation.UseMedicine}"
++                    IsChecked="{Binding SupplyUseMedicine}" />
++                <StackPanel IsEnabled="{Binding SupplyUseMedicine}">
++                    <DockPanel Margin="0,2">
++                        <hc:NumericUpDown
++                            Width="90"
++                            DockPanel.Dock="Right"
++                            Maximum="999"
++                            Minimum="0"
++                            Value="{Binding SupplyMedicineDailyLimit, UpdateSourceTrigger=PropertyChanged}" />
++                        <controls:TextBlock VerticalAlignment="Center" Text="{DynamicResource PersonalCultivation.MedicineDailyLimit}" />
++                    </DockPanel>
++                    <CheckBox Margin="0,4" IsChecked="{Binding SupplyUseExpiringMedicine}">
++                        <TextBlock Text="{DynamicResource PersonalCultivation.UseExpiringMedicine}" TextWrapping="Wrap" />
++                    </CheckBox>
++                </StackPanel>
++                <Expander Margin="0,10,0,0" Header="{DynamicResource PersonalCultivation.StageSources}">
++                    <Border
++                        Padding="6"
++                        BorderBrush="{DynamicResource BorderBrush}"
++                        BorderThickness="1,0,1,1">
++                        <StackPanel>
++                            <StackPanel Orientation="Horizontal">
++                                <controls:TextBlock Text="{DynamicResource PersonalCultivation.StageSourceLabel}" />
++                                <controls:TooltipBlock TooltipText="{DynamicResource PersonalCultivation.StageSourcesTip}" />
++                            </StackPanel>
++                            <hc:ComboBox
++                                Margin="0,4"
++                                DisplayMemberPath="Display"
++                                IsEditable="True"
++                                IsTextSearchEnabled="False"
++                                ItemsSource="{Binding SupplyMaterials}"
++                                Loaded="{s:Action MakeComboBoxSearchable,
++                                                  Target={x:Type ui_vms:SettingsViewModel}}"
++                                SelectedValue="{Binding SupplyMaterialId}"
++                                SelectedValuePath="Value" />
++                            <TextBox
++                                Margin="0,4"
++                                Text="{Binding SupplyStage, UpdateSourceTrigger=PropertyChanged}"
++                                ToolTip="{DynamicResource PersonalCultivation.StageNameTip}" />
++                            <Button
++                                Margin="0,4"
++                                Command="{s:Action SaveStageOverride}"
++                                Content="{DynamicResource PersonalCultivation.SaveStageSource}" />
++                            <ItemsControl ItemsSource="{Binding SupplyStageOverrides}">
++                                <ItemsControl.ItemTemplate>
++                                    <DataTemplate>
++                                        <DockPanel Margin="0,4">
++                                            <Button
++                                                Command="{s:Action RemoveStageOverride,
++                                                                   Target={x:Static taskQueue_vms:OperProgressTaskUserControlModel.Instance}}"
++                                                CommandParameter="{Binding}"
++                                                Content="×"
++                                                DockPanel.Dock="Right"
++                                                ToolTip="{DynamicResource Common.Delete}" />
++                                            <StackPanel>
++                                                <TextBlock Text="{Binding ItemName}" TextWrapping="Wrap" />
++                                                <TextBlock Text="{Binding Stage}" />
++                                            </StackPanel>
++                                        </DockPanel>
++                                    </DataTemplate>
++                                </ItemsControl.ItemTemplate>
++                            </ItemsControl>
++                        </StackPanel>
++                    </Border>
++                </Expander>
++            </StackPanel>
++        </StackPanel>
+     </StackPanel>
+ </UserControl>
+diff --git a/tools/PersonalCultivationUiTests/PersonalCultivationUiTests.csproj b/tools/PersonalCultivationUiTests/PersonalCultivationUiTests.csproj
+new file mode 100644
+index 0000000000..9e1c21e768
+--- /dev/null
++++ b/tools/PersonalCultivationUiTests/PersonalCultivationUiTests.csproj
+@@ -0,0 +1,16 @@
++<Project Sdk="Microsoft.NET.Sdk">
++  <PropertyGroup>
++    <OutputType>Exe</OutputType>
++    <TargetFramework>net10.0-windows10.0.17763.0</TargetFramework>
++    <UseWPF>true</UseWPF>
++    <EnableWindowsTargeting>true</EnableWindowsTargeting>
++    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
++    <SelfContained>true</SelfContained>
++    <Nullable>enable</Nullable>
++    <ImplicitUsings>enable</ImplicitUsings>
++    <NuGetAudit>false</NuGetAudit>
++  </PropertyGroup>
++  <ItemGroup>
++    <ProjectReference Include="../../src/MaaWpfGui/MaaWpfGui.csproj" AdditionalProperties="RuntimeIdentifier=win-x64;SelfContained=true" />
++  </ItemGroup>
++</Project>
+diff --git a/tools/PersonalCultivationUiTests/Program.cs b/tools/PersonalCultivationUiTests/Program.cs
+new file mode 100644
+index 0000000000..effab7f112
+--- /dev/null
++++ b/tools/PersonalCultivationUiTests/Program.cs
+@@ -0,0 +1,85 @@
++// <copyright file="Program.cs" company="MaaAssistantArknights">
++// Part of the MaaWpfGui project, maintained by the MaaAssistantArknights team (Maa Team)
++// Copyright (C) 2021-2026 MaaAssistantArknights Contributors
++//
++// This program is free software: you can redistribute it and/or modify
++// it under the terms of the GNU Affero General Public License v3.0 only as published by
++// the Free Software Foundation, either version 3 of the License, or
++// any later version.
++//
++// This program is distributed in the hope that it will be useful,
++// but WITHOUT ANY WARRANTY
++// </copyright>
++
++using System.Text.Json;
++using MaaWpfGui.Configuration.Single;
++using MaaWpfGui.Configuration.Single.MaaTask;
++using MaaWpfGui.Constants.Enums;
++using MaaWpfGui.Models.AsstTasks;
++using Newtonsoft.Json.Linq;
++using static MaaWpfGui.Configuration.Single.MaaTask.OperProgressTask;
++
++int checks = 0;
++void Check(bool condition, string message)
++{
++    if (!condition)
++    {
++        throw new InvalidOperationException(message);
++    }
++
++    checks++;
++}
++
++var oldConfig = JsonSerializer.Deserialize<OperProgressTask>("""
++    {"Plans":[{"Name":"桃金娘","Elite":2,"SkillLevel":7,"SkillMastery":[1,0,0],"ShowRole":false}]}
++    """)!;
++Check(!oldConfig.Supply.Enabled, "Existing tasks must not enable auto-supply implicitly.");
++Check(oldConfig.Plans[0].TargetLevel is null, "Existing targets must not acquire a level target.");
++Check(!oldConfig.Supply.Credit.Enabled && !oldConfig.Supply.RedVoucher.Enabled && !oldConfig.Supply.Medicine.Enabled,
++    "Default settings must not spend currency or potions.");
++Check(oldConfig.Supply.Credit.DailyLimit == 0 && oldConfig.Supply.RedVoucher.DailyLimit == 0 && oldConfig.Supply.Medicine.DailyLimit == 0,
++    "New budgets must start at zero.");
++
++var plan = new Plan(OperatorRole.Warrior, "测试干员", 2, 7, SkillMastery.Of(0, 0, 3), false)
++{
++    TargetLevel = new LevelTarget(2, 60),
++};
++var promoted = plan with { Elite = 0 };
++var restored = JsonSerializer.Deserialize<Plan>(JsonSerializer.Serialize(promoted))!;
++Check(restored.TargetLevel == new LevelTarget(2, 60), "Clearing a completed promotion must retain the independent level target after restart.");
++Check(restored.SkillMastery[2] == 3, "Specialization must survive configuration serialization.");
++
++var disabled = new AsstOperProgressTask { Plans = [restored] }.Serialize().Params;
++Check(disabled["supply"] is null, "Disabled supply must preserve the original Core request shape.");
++Check(disabled["plans"]![0]!["elite"] is null, "A cleared promotion must not be resubmitted.");
++Check(disabled["plans"]![0]!["target_level"]!.Value<int>("elite") == 2 && disabled["plans"]![0]!["target_level"]!.Value<int>("level") == 60,
++    "Level target serialization must preserve phase and level separately.");
++
++const string profileId = "bb390fc930db4d9895fecbd16122fc21";
++var supply = new SupplyOptions
++{
++    Enabled = true,
++    Credit = new PurchaseBudget { Enabled = true, DailyLimit = 200, Reserve = 100 },
++    RedVoucher = new PurchaseBudget { Enabled = true, DailyLimit = 360, Reserve = 90 },
++    Medicine = new MedicineBudget { Enabled = true, DailyLimit = 2, UseExpiring = true },
++    StageOverrides = new Dictionary<string, string> { ["30012"] = "1-7" },
++};
++var enabled = new AsstOperProgressTask { Plans = [restored], Supply = supply, ProfileId = profileId }.Serialize().Params;
++var serializedSupply = enabled["supply"]!;
++Check(serializedSupply.Value<string>("profile_id") == profileId, "Core must receive the persisted profile budget identity.");
++Check(serializedSupply["credit"]!.Value<int>("daily_limit") == 200 && serializedSupply["credit"]!.Value<int>("reserve") == 100,
++    "Credit limits must not be lost or exchanged with reserve amounts.");
++Check(serializedSupply["red_voucher"]!.Value<int>("daily_limit") == 360 && serializedSupply["red_voucher"]!.Value<int>("reserve") == 90,
++    "Red voucher limits must be independent of credit limits.");
++Check(serializedSupply["medicine"]!.Value<int>("daily_limit") == 2 && serializedSupply["medicine"]!.Value<bool>("use_expiring"),
++    "Expiring potions must be accompanied by the common daily potion limit.");
++Check(serializedSupply["stage_overrides"]!.Value<string>("30012") == "1-7", "Typed material sources must serialize to the Core item-to-stage map.");
++Check(serializedSupply["stone"] is null && enabled["stone"] is null, "Cultivation must not enable Originite Prime spending.");
++
++var copiedTask = JsonSerializer.Deserialize<OperProgressTask>(JsonSerializer.Serialize(new OperProgressTask { Plans = [restored], Supply = supply }))!;
++Check(copiedTask.Supply.StageOverrides["30012"] == "1-7" && copiedTask.Supply.RedVoucher.Reserve == 90,
++    "Budgets and typed stage overrides must survive configuration persistence.");
++var profile = JsonSerializer.Deserialize<SpecificConfig>($"{{\"PersonalCultivationProfileId\":\"{profileId}\"}}")!;
++Check(profile.PersonalCultivationProfileId == profileId, "Restoring a profile must retain the budget identity rather than generate a new allowance.");
++
++Console.WriteLine($"{checks} cultivation UI contract checks passed.");

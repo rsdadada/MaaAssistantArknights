@@ -1,0 +1,10 @@
+{
+    "schemaVersion": 1,
+    "upstreamRepository": "MaaAssistantArknights/MaaAssistantArknights",
+    "releaseRepository": "rsdadada/MaaAssistantArknights",
+    "resourceRepository": "MaaAssistantArknights/MaaResource",
+    "gameDataRepository": "yuanyan3060/ArknightsGameResource",
+    "revision": 1,
+    "patchBase": "v6.21.1",
+    "architecture": "win-x64"
+}
