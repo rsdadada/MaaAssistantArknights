@@ -64,6 +64,35 @@ class ReleaseTests(unittest.TestCase):
                 release.package(root)
             self.assertEqual(list((root / "artifacts").iterdir()), [])
 
+    def test_resource_overlay_preserves_models_and_updates_resources(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            base = root / "resource"
+            overlay = root / "hot-resource"
+            original = {
+                "onnx/skill_ready_cls.onnx": "bundled skill model",
+                "PaddleOCR/det/inference.onnx": "bundled OCR detector",
+                "PaddleOCR/rec/inference.onnx": "bundled OCR recognizer",
+                "tasks/tasks.json": "old tasks",
+                "version.json": "old version",
+            }
+            updates = {
+                "tasks/tasks.json": "updated tasks",
+                "version.json": "updated version",
+                "template/new-item.png": "new item template",
+            }
+            for directory, contents in ((base, original), (overlay, updates)):
+                for name, content in contents.items():
+                    path = directory / name
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    path.write_bytes(content.encode())
+
+            release.merge_resources(base, overlay)
+
+            for name, content in (original | updates).items():
+                with self.subTest(resource=name):
+                    self.assertEqual((base / name).read_bytes(), content.encode())
+
     def test_missing_artifacts_never_create_release_or_push_tag(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

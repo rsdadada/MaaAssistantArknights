@@ -264,6 +264,16 @@ def extract_repository(archive: Path, destination: Path):
                     shutil.copyfileobj(incoming, output)
 
 
+def merge_resources(base: Path, overlay: Path):
+    # MaaResource is a hot-update layer, not a complete installation: models and
+    # other binary resources must remain pinned to the official application tag.
+    if not base.is_dir() or not overlay.is_dir():
+        raise ValueError(
+            "Both the complete resource base and hot-update layer are required"
+        )
+    shutil.copytree(overlay, base, dirs_exist_ok=True)
+
+
 def prepare(root: Path, config: dict, job: dict, workspace: Path):
     workspace.mkdir(parents=True, exist_ok=False)
     source = workspace / "source"
@@ -307,13 +317,12 @@ def prepare(root: Path, config: dict, job: dict, workspace: Path):
         resource_zip,
     )
     extract_repository(resource_zip, workspace / "resource-source")
-    # Replace the official resource snapshot in the isolated checkout only. This
-    # directory was just created above; no caller-controlled install path is used.
+    # Overlay the hot-update snapshot onto the complete resources from the pinned
+    # application tag. Resource-only builds use their compatible personal app tag.
     resource_dir = (source / "resource").resolve()
     if not resource_dir.is_relative_to(workspace.resolve()):
         raise ValueError("Resource destination escaped workspace")
-    shutil.rmtree(resource_dir)
-    shutil.copytree(workspace / "resource-source/resource", resource_dir)
+    merge_resources(resource_dir, workspace / "resource-source/resource")
     data = workspace / "gamedata"
     for name in DATA_FILES:
         download(
